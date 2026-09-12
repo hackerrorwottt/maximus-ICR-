@@ -1,0 +1,15 @@
+opencv-python
+numpy
+easyocr
+torch
+torchvision
+transformers
+pyspellchecker
+Pillow
+datasets
+accelerate
+evaluate
+jiwer
+fastapi
+uvicorn
+python-multipart

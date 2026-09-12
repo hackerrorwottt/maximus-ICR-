@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ICR Cyberpunk UI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css?v=3">
+</head>
+<body>
+    <canvas id="matrix-canvas"></canvas>
+    <div class="scanlines"></div>
+    <div class="container">
+        <header>
+            <h1 class="glitch" data-text="MAXIMUS">MAXIMUS</h1>
+            <p class="subtitle">INTELLIGENT CHARACTER RECOGNITION TERMINAL</p>
+        </header>
+
+        <main>
+            <div class="panel upload-panel">
+                <div class="panel-header">
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    INPUT_MODULE
+                </div>
+                <div class="panel-content">
+                    <form id="upload-form">
+                        <div class="file-upload" id="drop-zone">
+                            <input type="file" id="image-input" name="file" accept="image/*" required>
+                            <label for="image-input" id="file-label">
+                                <span class="neon-text">CLICK OR DROP IMAGE DATA HERE</span>
+                            </label>
+                            <div id="preview-container" style="display:none; position: relative; margin-top: 1rem; flex: 1; justify-content: center; align-items: center; width: 100%;">
+                                <img id="image-preview" alt="Preview">
+                            </div>
+                        </div>
+
+                        
+                        <button type="submit" class="cyber-button" id="submit-btn">
+                            <span class="btn-text">INITIALIZE_EXTRACTION</span>
+                        </button>
+                        <button type="button" class="cyber-button" id="remove-image-btn" style="display:none; margin-top: 1rem; border-color: var(--primary-pink); color: var(--primary-pink);">
+                            <span class="btn-text">REMOVE_DATA</span>
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="panel result-panel">
+                <div class="panel-header">
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    OUTPUT_MODULE
+                </div>
+                <div class="panel-content terminal">
+                    <div id="loading" class="hidden">
+                        <p class="blink">>> PROCESSING IMAGE DATA...</p>
+                        <div class="progress-bar"><div class="progress-fill"></div></div>
+                    </div>
+                    <div id="result" class="hidden">
+                        <div class="meta-data">
+                            <span id="confidence-score">CONFIDENCE: --</span>
+                            <span id="status-badge" class="badge">AWAITING</span>
+                        </div>
+                        <div class="text-output" id="extracted-text"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/script.js?v=3"></script>
+</body>
+</html>
