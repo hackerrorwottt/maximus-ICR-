@@ -116,9 +116,9 @@ class ICRRecognizer:
             
         texts = []
         for bbox, easy_text, prob in easyocr_results:
-            # If the EasyOCR text contains digits, or is very short (like a list bullet),
-            # we trust EasyOCR because TrOCR struggles heavily with isolated numbers.
-            if any(char.isdigit() for char in easy_text) or len(easy_text.strip()) <= 2:
+            # If the EasyOCR text is very short (like a single character/bullet point),
+            # we skip it for TrOCR.
+            if len(easy_text.strip()) <= 2:
                 texts.append(easy_text)
                 continue
                 
