@@ -5,7 +5,7 @@ import shutil
 import os
 import cv2
 
-from preprocess import preprocess_image
+from preprocess import preprocess_image, detect_text_lines
 from recognize import ICRRecognizer
 from postprocess import postprocess_text
 
@@ -63,8 +63,8 @@ async def upload_image(
                 print("DEBUG: Running TrOCR full image")
                 trocr_text, _ = recognizer.recognize_with_trocr_full_image(processed_img)
             else:
-                print("DEBUG: Running TrOCR crop-by-crop for multi-line document")
-                trocr_text, _ = recognizer.recognize_with_trocr(processed_img, easyocr_results)
+                print("DEBUG: Running Custom Line Detection for TrOCR")
+                trocr_text, _ = recognizer.recognize_with_trocr_custom_lines(original_img, easyocr_results=easyocr_results)
                 
             print(f"DEBUG: trocr_text = {repr(trocr_text)}")
             trocr_clean = postprocess_text(trocr_text)
