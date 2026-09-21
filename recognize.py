@@ -1,9 +1,14 @@
 import os
-import easyocr
 import torch
 import cv2
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+import easyocr
+from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image
+import sys
+from unittest.mock import MagicMock
+mock_flash = MagicMock()
+mock_flash.__spec__ = MagicMock()
+sys.modules['flash_attn'] = mock_flash
 
 class ICRRecognizer:
     def __init__(self):
@@ -27,20 +32,14 @@ class ICRRecognizer:
         print("Initializing EasyOCR...")
         # gpu parameter ensures it runs on the detected hardware if possible
         use_gpu_for_easyocr = self.device.type != 'cpu'
-        self.easyocr_reader = easyocr.Reader(['en'], gpu=use_gpu_for_easyocr)
+        self.easyocr_reader = easyocr.Reader(['en', 'hi'], gpu=use_gpu_for_easyocr)
         
-        # 2. TrOCR Setup (Transformer-based Optical Character Recognition)
-        # We check if a local fine-tuned model exists first.
-        fine_tuned_path = "./fine_tuned_trocr"
-        if os.path.exists(fine_tuned_path):
-            print(f"Initializing custom FINE-TUNED TrOCR from {fine_tuned_path}...")
-            trocr_model_id = fine_tuned_path
-        else:
-            print("Initializing TrOCR (base model)...")
-            trocr_model_id = "microsoft/trocr-large-handwritten"
-            
-        self.trocr_processor = TrOCRProcessor.from_pretrained(trocr_model_id)
-        self.trocr_model = VisionEncoderDecoderModel.from_pretrained(trocr_model_id).to(self.device)
+        # 2. Florence-2 Setup (State-of-the-art Vision-Language Model)
+        # This replaces TrOCR because it reads the entire page natively without needing bounding boxes!
+        print("Initializing Florence-2 VLM...")
+        self.florence_model_id = "microsoft/Florence-2-base"
+        self.florence_model = AutoModelForCausalLM.from_pretrained(self.florence_model_id, trust_remote_code=True).to(self.device)
+        self.florence_processor = AutoProcessor.from_pretrained(self.florence_model_id, trust_remote_code=True)
         print("Models loaded successfully.\n")
 
     def recognize_with_easyocr(self, image_np):
@@ -53,115 +52,78 @@ class ICRRecognizer:
         if not results:
             return "", 0.0, []
             
+        # Filter out extreme low confidence boxes (smudges, watermarks)
+        filtered_results = [r for r in results if r[2] >= 0.15]
+        
+        # Calculate centers
+        boxes_with_centers = []
+        for bbox, text, prob in filtered_results:
+            tl, tr, br, bl = bbox
+            cx = (tl[0] + tr[0] + br[0] + bl[0]) / 4
+            cy = (tl[1] + tr[1] + br[1] + bl[1]) / 4
+            h = (bl[1] + br[1]) / 2 - (tl[1] + tr[1]) / 2
+            boxes_with_centers.append((bbox, text, prob, cx, cy, h))
+            
+        # Sort by cy first
+        boxes_with_centers.sort(key=lambda x: x[4])
+        
+        lines = []
+        current_line = []
+        current_cy = None
+        
+        for box in boxes_with_centers:
+            bbox, text, prob, cx, cy, h = box
+            if current_cy is None:
+                current_line.append(box)
+                current_cy = cy
+            else:
+                # If vertical center is within half a line height, it's the same line
+                if abs(cy - current_cy) < h * 0.5:
+                    current_line.append(box)
+                    current_cy = (current_cy * (len(current_line)-1) + cy) / len(current_line)
+                else:
+                    lines.append(current_line)
+                    current_line = [box]
+                    current_cy = cy
+        if current_line:
+            lines.append(current_line)
+            
+        # Sort each line horizontally and build text
+        full_text = ""
         texts = []
         confidences = []
         detailed_results = []
         
-        full_text = ""
-        prev_y_min = None
-        prev_y_max = None
-        
-        for (bbox, text, prob) in results:
-            # Filter out extreme low confidence boxes (smudges, watermarks, paper folds)
-            if prob < 0.25:
-                continue
+        for i, line in enumerate(lines):
+            line.sort(key=lambda x: x[3]) # Sort by cx left-to-right
+            line_texts = []
+            for bbox, text, prob, cx, cy, h in line:
+                line_texts.append(text)
+                texts.append(text)
+                confidences.append(prob)
+                detailed_results.append((bbox, text, prob))
             
-            texts.append(text)
-            confidences.append(prob)
-            detailed_results.append((bbox, text, prob))
-            
-            tl, tr, br, bl = bbox
-            y_min = min(tl[1], tr[1])
-            y_max = max(bl[1], br[1])
-            
-            if prev_y_max is not None:
-                # If current box starts below the vertical center of the previous box, it's a new line
-                prev_center = (prev_y_min + prev_y_max) / 2
-                if y_min > prev_center:
-                    # Calculate gap to determine if it's a new paragraph or just a new line
-                    line_height = prev_y_max - prev_y_min
-                    gap = y_min - prev_y_max
-                    if gap > line_height * 0.5:
-                        full_text += "\n\n"
-                    else:
-                        full_text += "\n"
+            full_text += " ".join(line_texts)
+            if i < len(lines) - 1:
+                # Simple gap check to insert paragraph breaks
+                next_cy = lines[i+1][0][4]
+                if (next_cy - current_cy) > h * 1.5:
+                    full_text += "\n\n"
                 else:
-                    full_text += " "
-                    
-            full_text += text
-            prev_y_min = y_min
-            prev_y_max = y_max
-            
+                    full_text += "\n"
+                current_cy = next_cy
+                
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
         
         return full_text.strip(), avg_confidence, detailed_results
 
-    def recognize_with_trocr(self, image_np, easyocr_results):
+    def recognize_with_florence2(self, image_np):
         """
-        Run TrOCR on the image numpy array.
-        TrOCR expects a PIL Image.
-        Returns the text. (TrOCR doesn't easily expose character-level confidence 
-        in a simple API out-of-the-box like EasyOCR, so we approximate or omit it).
+        Run Florence-2 VLM on the entire image.
+        This model bypasses EasyOCR bounding boxes and natively transcribes the full page.
+        """
+        prompt = "<OCR>"
         
-        *Learning Note*: TrOCR often performs better on contrast-enhanced grayscale 
-        images rather than hard-binarized ones. If binarization was applied in preprocessing,
-        you might observe worse results here compared to EasyOCR.
-        
-        *Crucial Note*: TrOCR is a line-level recognizer. If you feed it a full page, 
-        it will hallucinate or output garbage (like "0 1"). We must use a text detector 
-        (in this case, we reuse EasyOCR's bounding boxes) to crop the image into lines first.
-        """
-        if not easyocr_results:
-            return "", None
-            
-        texts = []
-        for bbox, easy_text, prob in easyocr_results:
-            # If the EasyOCR text is very short (like a single character/bullet point),
-            # we skip it for TrOCR.
-            if len(easy_text.strip()) <= 2:
-                texts.append(easy_text)
-                continue
-                
-            # bbox is a list of 4 points: [top-left, top-right, bottom-right, bottom-left]
-            # Convert to ints and find the bounding rectangle
-            tl, tr, br, bl = bbox
-            x_min = max(0, int(min(tl[0], bl[0])))
-            x_max = min(image_np.shape[1], int(max(tr[0], br[0])))
-            y_min = max(0, int(min(tl[1], tr[1])))
-            y_max = min(image_np.shape[0], int(max(bl[1], br[1])))
-            
-            crop_np = image_np[y_min:y_max, x_min:x_max]
-            
-            # Skip invalid crops
-            if crop_np.size == 0 or x_max <= x_min or y_max <= y_min:
-                continue
-
-            # Convert OpenCV numpy array (BGR or Grayscale) to PIL Image (RGB)
-            if len(crop_np.shape) == 2: # Grayscale
-                pil_image = Image.fromarray(crop_np).convert("RGB")
-            else: # BGR
-                rgb_image = crop_np[:, :, ::-1] 
-                pil_image = Image.fromarray(rgb_image)
-
-            # Preprocess for the transformer model
-            pixel_values = self.trocr_processor(images=pil_image, return_tensors="pt").pixel_values.to(self.device)
-            
-            # Generate text
-            with torch.no_grad():
-                generated_ids = self.trocr_model.generate(pixel_values, max_length=128)
-                
-            # Decode the tokens back to string
-            generated_text = self.trocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            texts.append(generated_text)
-            
-        return " ".join(texts), None
-
-    def recognize_with_trocr_full_image(self, image_np):
-        """
-        Run TrOCR on the entire image without using EasyOCR's bounding boxes.
-        This often works much better if the image is just a single sentence or phrase,
-        because EasyOCR bounding boxes can chop cursive words in half.
-        """
         # Convert OpenCV numpy array (BGR or Grayscale) to PIL Image (RGB)
         if len(image_np.shape) == 2: # Grayscale
             pil_image = Image.fromarray(image_np).convert("RGB")
@@ -169,126 +131,18 @@ class ICRRecognizer:
             rgb_image = image_np[:, :, ::-1] 
             pil_image = Image.fromarray(rgb_image)
 
-        # Preprocess for the transformer model
-        pixel_values = self.trocr_processor(images=pil_image, return_tensors="pt").pixel_values.to(self.device)
+        inputs = self.florence_processor(text=prompt, images=pil_image, return_tensors="pt").to(self.device)
         
-        # Generate text
         with torch.no_grad():
-            # Allow longer max length since it's the whole image
-            generated_ids = self.trocr_model.generate(pixel_values, max_length=256)
+            generated_ids = self.florence_model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+                early_stopping=False
+            )
             
-        # Decode the tokens back to string
-        generated_text = self.trocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        generated_text = self.florence_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        parsed_answer = self.florence_processor.post_process_generation(generated_text, task="<OCR>", image_size=(pil_image.width, pil_image.height))
         
-        return generated_text, None
-
-    def group_boxes_into_lines(self, easyocr_results):
-        """
-        Groups EasyOCR word-level bounding boxes into line-level bounding boxes.
-        This is robust against notebook paper lines (which EasyOCR ignores) 
-        unlike raw morphological thresholding.
-        """
-        boxes = [r[0] for r in easyocr_results]
-        if not boxes:
-            return []
-            
-        # Sort boxes by y_center
-        sorted_boxes = sorted(boxes, key=lambda b: (min(b[0][1], b[1][1]) + max(b[2][1], b[3][1])) / 2)
-        
-        lines = []
-        current_line = []
-        current_y_center = None
-        
-        for bbox in sorted_boxes:
-            tl, tr, br, bl = bbox
-            y_min = min(tl[1], tr[1])
-            y_max = max(bl[1], br[1])
-            y_center = (y_min + y_max) / 2
-            h = y_max - y_min
-            
-            if current_y_center is None:
-                current_line.append(bbox)
-                current_y_center = y_center
-            else:
-                # If y_center is within half the height of the line, merge it
-                if abs(y_center - current_y_center) < h * 0.7:
-                    current_line.append(bbox)
-                    # Update average y_center
-                    current_y_center = sum((min(b[0][1], b[1][1]) + max(b[2][1], b[3][1])) / 2 for b in current_line) / len(current_line)
-                else:
-                    lines.append(current_line)
-                    current_line = [bbox]
-                    current_y_center = y_center
-        
-        if current_line:
-            lines.append(current_line)
-            
-        line_bboxes = []
-        for line in lines:
-            x_min = min(min(b[0][0], b[3][0]) for b in line)
-            x_max = max(max(b[1][0], b[2][0]) for b in line)
-            y_min = min(min(b[0][1], b[1][1]) for b in line)
-            y_max = max(max(b[2][1], b[3][1]) for b in line)
-            
-            # Keep padding minimal so crops don't overlap with adjacent lines (which causes TrOCR to hallucinate)
-            pad_x = 5
-            pad_y = 2
-            x_min = max(0, x_min - pad_x)
-            x_max = x_max + pad_x
-            y_min = max(0, y_min - pad_y)
-            y_max = y_max + pad_y
-            
-            line_bboxes.append([[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]])
-            
-        return line_bboxes
-
-    def recognize_with_trocr_custom_lines(self, image_np, easyocr_results=None, line_bboxes=None):
-        """
-        Run TrOCR using custom unbroken line bounding boxes instead of EasyOCR's word-level boxes.
-        This is critical for cursive handwriting where EasyOCR chops connected words.
-        """
-        if easyocr_results and not line_bboxes:
-            line_bboxes = self.group_boxes_into_lines(easyocr_results)
-            
-        if not line_bboxes:
-            return "", None
-            
-        texts = []
-        for bbox in line_bboxes:
-            # bbox is [tl, tr, br, bl]
-            tl, tr, br, bl = bbox
-            x_min = max(0, int(min(tl[0], bl[0])))
-            x_max = min(image_np.shape[1], int(max(tr[0], br[0])))
-            y_min = max(0, int(min(tl[1], tr[1])))
-            y_max = min(image_np.shape[0], int(max(bl[1], br[1])))
-            
-            crop_np = image_np[y_min:y_max, x_min:x_max]
-            
-            # Skip invalid crops
-            if crop_np.size == 0 or x_max <= x_min or y_max <= y_min:
-                continue
-
-            # Convert OpenCV numpy array (BGR or Grayscale) to PIL Image (RGB)
-            if len(crop_np.shape) == 2: # Grayscale
-                pil_image = Image.fromarray(crop_np).convert("RGB")
-            else: # BGR
-                rgb_image = crop_np[:, :, ::-1] 
-                pil_image = Image.fromarray(rgb_image)
-
-            # Preprocess for the transformer model
-            pixel_values = self.trocr_processor(images=pil_image, return_tensors="pt").pixel_values.to(self.device)
-            
-            # Generate text using Beam Search for significantly higher accuracy
-            with torch.no_grad():
-                generated_ids = self.trocr_model.generate(
-                    pixel_values, 
-                    max_length=128,
-                    num_beams=5,
-                    early_stopping=True
-                )
-                
-            # Decode the tokens back to string
-            generated_text = self.trocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            texts.append(generated_text)
-            
-        return "\n".join(texts), None
+        return parsed_answer["<OCR>"], None
