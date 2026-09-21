@@ -42,23 +42,31 @@ async def upload_image(
             apply_grayscale=True,
             apply_blue_channel=False,
             apply_contrast=True,
-            apply_noise_removal=True,
-            apply_binarization=True,
-            apply_deskew=True
+            apply_noise_removal=False,
+            apply_binarization=False,
+            apply_deskew=False
         )
 
         easyocr_text, easyocr_conf, easyocr_results = recognizer.recognize_with_easyocr(processed_img)
-        
-        # Heuristic: If there are many words, it's a full page document.
-        # TrOCR and LLMs are excessively slow for full pages, and EasyOCR is usually sufficient.
-        is_full_page = len(easyocr_results) > 20
+
+        # Heuristic: If there are many words or multiple lines, it's a full document.
+        print(f"DEBUG: len(easyocr_results) = {len(easyocr_results)}")
+        is_full_page = len(easyocr_results) > 2 or "\n" in easyocr_text
+        print(f"DEBUG: is_full_page = {is_full_page}")
 
         trocr_text = ""
         trocr_clean = "SKIPPED"
-        # Only run TrOCR if confidence is low AND it's a short text/snippet.
-        if easyocr_conf < 0.85 and not is_full_page:
-            # Run TrOCR on the full snippet image instead of relying on EasyOCR's bounding boxes
-            trocr_text, _ = recognizer.recognize_with_trocr_full_image(processed_img)
+        
+        # If EasyOCR confidence is low, leverage TrOCR (which is better at cursive/messy text)
+        if easyocr_conf < 0.90:
+            if not is_full_page:
+                print("DEBUG: Running TrOCR full image")
+                trocr_text, _ = recognizer.recognize_with_trocr_full_image(processed_img)
+            else:
+                print("DEBUG: Running TrOCR crop-by-crop for multi-line document")
+                trocr_text, _ = recognizer.recognize_with_trocr(processed_img, easyocr_results)
+                
+            print(f"DEBUG: trocr_text = {repr(trocr_text)}")
             trocr_clean = postprocess_text(trocr_text)
 
         easyocr_clean = postprocess_text(easyocr_text)

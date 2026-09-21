@@ -84,7 +84,10 @@ def preprocess_image(image_path,
              gray = processed
              
         # Invert the image (so text is white, background is black) to find coordinates
-        coords = np.column_stack(np.where(gray > 0))
+        # We MUST threshold first, otherwise gray > 0 selects the entire light background!
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY_INV, 21, 10)
+        coords = np.column_stack(np.where(thresh > 0))
         if len(coords) > 0:
             angle = cv2.minAreaRect(coords)[-1]
             # cv2.minAreaRect returns values in the range [-90, 0)
